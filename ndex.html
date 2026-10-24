@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>文档扫描</title>
+<script src="https://cdn.jsdelivr.net/npm/opencv.js@4.8.0/opencv.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,sans-serif}
+body{background:#f5f7fa;padding:16px;color:#222}
+.container{max-width:620px;margin:0 auto}
+.header{background:#2563eb;color:#fff;padding:16px;border-radius:12px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center}
+.steps{display:flex;gap:8px;margin-bottom:16px}
+.step{padding:6px 10px;border-radius:8px;background:#e2e8f0}
+.step.active{background:#2563eb;color:#fff}
+.btns{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+button{flex:1;padding:13px;border:none;border-radius:10px;font-size:16px}
+.btn-blue{background:#2563eb;color:#fff}
+.btn-gray{background:#94a3b8;color:#fff}
+#previewBox{position:relative;background:#fff;border-radius:10px;overflow:hidden;margin-bottom:16px}
+#preview{width:100%;display:block}
+.dot{position:absolute;width:30px;height:30px;background:#2563eb;border:3px solid #fff;border-radius:50%;touch-action:none;z-index:2}
+.filter-bar{display:flex;gap:8px;margin:12px 0}
+.filter-bar button{background:#fff;color:#222;border:1px solid #cbd5e1}
+.filter-bar button.active{background:#2563eb;color:#fff;border-color:#2563eb}
+.result{margin-top:20px}
+#resultImg{width:100%;border-radius:10px;display:none}
+.tip{text-align:center;color:#666;font-size:14px;margin:8px 0 16px}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h2>文档扫描</h2>
+    <span style="font-size:14px">本地处理 · 不上传</span>
+  </div>
+  <div class="steps">
+    <div class="step active">1 调整四角</div>
+    <div class="step">2 矫正增强</div>
+  </div>
+  <div class="btns">
+    <button class="btn-blue" id="btnPick">📁 选择图片</button>
+    <button class="btn-blue" id="btnCamera">📷 拍照</button>
+  </div>
+  <input type="file" id="fileInput" accept="image/*" style="display:none">
+  <input type="file" id="camInput" accept="image/*" capture="environment" style="display:none">
+
+  <div id="previewBox">
+    <img id="preview">
+    <div class="dot" data-idx="0"></div>
+    <div class="dot" data-idx="1"></div>
+    <div class="dot" data-idx="2"></div>
+    <div class="dot" data-idx="3"></div>
+  </div>
+  <div class="tip">拖动四个蓝色圆点，让方框贴合文档边缘</div>
+  <div class="btns">
+    <button class="btn-gray" id="btnAuto">✨自动识别</button>
+    <button class="btn-gray" id="btnReset">↩重置</button>
+    <button class="btn-blue" id="btnCrop">✓矫正并增强</button>
+  </div>
+  <div class="filter-bar">
+    <button class="active" data-type="origin">原图</button>
+    <button data-type="enhance">增强</button>
+    <button data-type="gray">灰度</button>
+    <button data-type="bw">黑白</button>
+  </div>
+  <div class="result">
+    <img id="resultImg">
+  </div>
+</div>
+
+<script>
+let cvReady = false;
+let imgEl = null;
+let srcImg = null;
+let preview = document.getElementById('preview');
+const dots = Array.from(document.querySelectorAll('.dot'));
+const previewBox = document.getElementById('previewBox');
+const resultImg = document.getElementById('resultImg');
+const btnPick = document.getElementById('btnPick');
+const btnCamera = document.getElementById('btnCamera');
+const btnAuto = document.getElementById('btnAuto');
+const btnReset = document.getElementById('btnReset');
+const btnCrop = document.getElementById('btnCrop');
+const fileInput = document.getElementById('fileInput');
+const camInput = document.getElementById('camInput');
+let selectedFilter = 'origin';
+let imgW, imgH;
+let scale = 1;
+// 四个点：左上、右上、右下、左下
+let points = [[0.05,0.05], [0.95,0.05], [0.95,0.95], [0.05,0.95]];
+
+// opencv就绪
+cv['onRuntimeInitialized'] = () => {
+  cvReady = true;
+  console.log("opencv.js加载完成");
+};
+
+btnPick.onclick = ()=>fileInput.click();
+btnCamera.onclick = ()=>camInput.click();
+fileInput.onchange = (e)=> loadImage(e.target.files[0]);
+camInput.onchange = (e)=> loadImage(e.target.files[0]);
+
+document.querySelectorAll('.filter-bar button').forEach(b=>{
+  b.onclick = ()=>{
+    document.querySelectorAll('.filter-bar button').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    selectedFilter = b.dataset.type;
+  }
+})
+
+function loadImage(file){
+  const reader = new FileReader();
+  reader.onload = function(ev){
+    preview.src = ev.target.result;
+    preview.onload = function(){
+      imgEl = preview;
+      imgW = preview.naturalWidth;
+      imgH = preview.naturalHeight;
+      previewBox.style.width = "100%";
+      previewBox.style.height = "auto";
+      scale = preview.clientWidth / imgW;
+      resetPoints();
+      syncDots();
+      resultImg.style.display = "none";
+    }
+  }
+  reader.readAsDataURL(file);
+}
+
+function resetPoints(){
+  points = [[0.05,0.05], [0.95,0.05], [0.95,0.95], [0.05,0.95]];
+  syncDots();
+}
+btnReset.onclick = resetPoints;
+
+function syncDots(){
+  const boxW = preview.clientWidth;
+  const boxH = preview.clientHeight;
+  for(let i=0;i<4;i++){
+    const [rx,ry] = points[i];
+    dots[i].style.left = (rx * boxW - 15)+"px";
+    dots[i].style.top = (ry * boxH -15)+"px";
+  }
+}
+
+// 拖拽点
+let dragIndex = null;
+dots.forEach((dot,idx)=>{
+  dot.addEventListener('touchstart',(e)=>{
+    dragIndex = idx;
+    e.preventDefault();
+  })
+  dot.addEventListener('touchmove',(e)=>{
+    if(dragIndex === null) return;
+    const t = e.touches[0];
+    const rect = preview.getBoundingClientRect();
+    let x = (t.clientX - rect.left) / rect.width;
+    let y = (t.clientY - rect.top) / rect.height;
+    x = Math.max(0, Math.min(1, x));
+    y = Math.max(0, Math.min(1, y));
+    points[dragIndex] = [x,y];
+    syncDots();
+  })
+  dot.addEventListener('touchend',()=> dragIndex=null);
+})
+
+//自动识别
+btnAuto.onclick = async function(){
+  if(!cvReady) return alert("内核还没加载完，请稍等");
+  if(!imgEl) return alert("先选择图片");
+  const mat = cv.imread(imgEl);
+  cv.cvtColor(mat, mat, cv.COLOR_RGBA2GRAY);
+  cv.GaussianBlur(mat, mat, new cv.Size(5,5),0);
+  cv.Canny(mat,mat,50,150);
+  let contours = new cv.MatVector();
+  let hierarchy = new cv.Mat();
+  cv.findContours(mat, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+  let maxArea = 0;
+  let bestContour = null;
+  for(let i=0;i<contours.size();i++){
+    const c = contours.get(i);
+    const area = cv.contourArea(c);
+    if(area > maxArea){
+      maxArea = area;
+      bestContour = c;
+    }
+  }
+  if(!bestContour){
+    alert("自动识别失败，请手动拖动四个点");
+    mat.delete();contours.delete();hierarchy.delete();
+    return;
+  }
+  let approx = new cv.Mat();
+  cv.approxPolyDP(bestContour, approx, cv.arcLength(bestContour,true)*0.02, true);
+  if(approx.rows !== 4){
+    alert("自动识别失败，请手动拖动四个点");
+    mat.delete();contours.delete();hierarchy.delete();approx.delete();
+    return;
+  }
+  let arr = [];
+  for(let i=0;i<4;i++){
+    const x = approx.data32S[i*2];
+    const y = approx.data32S[i*2+1];
+    arr.push({x,y});
+  }
+  //排序：左上、右上、右下、左下
+  arr.sort((a,b)=> (a.x+a.y) - (b.x+b.y));
+  const tl = arr[0];
+  const br = arr[3];
+  const tr = arr[1].x > arr[2].x ? arr[1] : arr[2];
+  const bl = arr[1].x < arr[2].x ? arr[1] : arr[2];
+  points = [
+    [tl.x/imgW, tl.y/imgH],
+    [tr.x/imgW, tr.y/imgH],
+    [br.x/imgW, br.y/imgH],
+    [bl.x/imgW, bl.y/imgH]
+  ]
+  syncDots();
+  mat.delete();contours.delete();hierarchy.delete();approx.delete();
+  alert("✅识别完成，微调圆点");
+}
+
+//矫正
+btnCrop.onclick = async function(){
+  if(!cvReady) return alert("内核加载中，请等一会");
+  if(!imgEl) return alert("先选图片");
+  const mat = cv.imread(imgEl);
+  const srcPts = [];
+  for(let i=0;i<4;i++){
+    const [rx,ry] = points[i];
+    srcPts.push(rx*imgW, ry*imgH);
+  }
+  //目标宽高
+  const w = 600;
+  const h = 800;
+  const dstPts = [0,0, w,0, w,h, 0,h];
+  const srcMat = cv.matFromArray(4,1,cv.CV_32FC2, srcPts);
+  const dstMat = cv.matFromArray(4,1,cv.CV_32FC2, dstPts);
+  const M = cv.getPerspectiveTransform(srcMat, dstMat);
+  const warp = new cv.Mat();
+  cv.warpPerspective(mat, warp, M, new cv.Size(w,h));
+
+  //滤镜处理
+  if(selectedFilter !== 'origin'){
+    if(selectedFilter === 'gray'){
+      cv.cvtColor(warp, warp, cv.COLOR_RGBA2GRAY);
+    }else if(selectedFilter === 'bw'){
+      cv.cvtColor(warp, warp, cv.COLOR_RGBA2GRAY);
+      cv.threshold(warp, warp, 120,255, cv.THRESH_BINARY);
+    }else if(selectedFilter === 'enhance'){
+      cv.cvtColor(warp, warp, cv.COLOR_RGBA2GRAY);
+      cv.equalizeHist(warp, warp);
+    }
+  }
+  //导出
+  const canvas = document.createElement("canvas");
+  cv.imshow(canvas, warp);
+  resultImg.src = canvas.toDataURL("image/jpeg",0.95);
+  resultImg.style.display = "block";
+
+  mat.delete();srcMat.delete();dstMat.delete();M.delete();warp.delete();
+}
+</script>
+</body>
+</html>
